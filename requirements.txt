@@ -1,7 +1,8 @@
 fastapi==0.135.3
 python-multipart==0.0.26
 uvicorn==0.44.0
-opencv-python==4.13.0.92
+websockets>=16.0
+opencv-python-headless==4.13.0.92
 numpy==2.2.6
 mediapipe==0.10.14
 google-cloud-storage==2.8.0

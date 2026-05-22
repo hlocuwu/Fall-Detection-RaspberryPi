@@ -1,4 +1,5 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from contextlib import asynccontextmanager
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from collections import deque
@@ -30,7 +31,12 @@ def send_telegram_alert(message: str):
         print(f"[TELEGRAM] Error: {e}")
 
 # ── App & MediaPipe ───────────────────────────────────────────────────────────
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    asyncio.create_task(ai_inference_worker())
+    yield
+
+app = FastAPI(lifespan=lifespan)
 app.mount("/custom", StaticFiles(directory="custom"), name="custom")
 
 mp_pose    = mp.solutions.pose
@@ -188,10 +194,6 @@ async def ai_inference_worker():
                 web_clients.difference_update(dead)
         except Exception as e:
             print(f"[WORKER] {e}")
-
-@app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(ai_inference_worker())
 
 # ── WebSocket endpoints ───────────────────────────────────────────────────────
 @app.websocket("/ws/pi")
