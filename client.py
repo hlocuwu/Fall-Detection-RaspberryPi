@@ -19,16 +19,22 @@ print(f"[CONFIG] SERVER_URL    = {SERVER_URL}")
 print(f"[CONFIG] CAMERA_INDEX  = {CAMERA_INDEX}")
 
 # ── Buzzer ────────────────────────────────────────────────────────────────────
-BUZZER_PIN = 17
+BUZZER_PIN   = 17
+buzzer_stop  = threading.Event()
+buzzer_lock  = threading.Lock()
+buzzer_running = False
+
 if GPIO_AVAILABLE:
     GPIO.setwarnings(False)
     GPIO.setmode(GPIO.BCM)
     GPIO.setup(BUZZER_PIN, GPIO.OUT)
-    GPIO.output(BUZZER_PIN, GPIO.HIGH)
+    GPIO.output(BUZZER_PIN, GPIO.HIGH)  # HIGH = tắt (active-low buzzer)
 
-def sound_buzzer(beeps=3, on_time=0.5, off_time=0.3):
+def _buzzer_loop(on_time=0.5, off_time=0.3):
+    global buzzer_running
+    buzzer_stop.clear()
     try:
-        for _ in range(beeps):
+        while not buzzer_stop.is_set():
             if GPIO_AVAILABLE:
                 GPIO.output(BUZZER_PIN, GPIO.LOW)
                 time.sleep(on_time)
@@ -39,6 +45,23 @@ def sound_buzzer(beeps=3, on_time=0.5, off_time=0.3):
                 time.sleep(on_time + off_time)
     except Exception as e:
         print(f"[BUZZER] Error: {e}")
+    finally:
+        if GPIO_AVAILABLE:
+            GPIO.output(BUZZER_PIN, GPIO.HIGH)
+        with buzzer_lock:
+            buzzer_running = False
+        print("[BUZZER] Stopped")
+
+def start_buzzer():
+    global buzzer_running
+    with buzzer_lock:
+        if buzzer_running:
+            return
+        buzzer_running = True
+    threading.Thread(target=_buzzer_loop, daemon=True).start()
+
+def stop_buzzer():
+    buzzer_stop.set()
 
 # ── Camera ────────────────────────────────────────────────────────────────────
 CAMERA_RESOLUTION = (640, 480)
@@ -81,9 +104,13 @@ def send_metrics():
 
 # ── WebSocket ─────────────────────────────────────────────────────────────────
 def on_message(ws, message):
-    if json.loads(message).get("event") == "FALL":
+    event = json.loads(message).get("event")
+    if event == "FALL":
         print("[FALL] Detected — activating buzzer")
-        threading.Thread(target=sound_buzzer, daemon=True).start()
+        start_buzzer()
+    elif event == "RESET":
+        print("[RESET] Alarm reset by operator")
+        stop_buzzer()
 
 def on_error(ws, error):
     print(f"[WS] Error: {error}")

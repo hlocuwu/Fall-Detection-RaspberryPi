@@ -134,6 +134,48 @@
             color: #ff4d6d;
         }
 
+        .alarm-banner {
+            display: none;
+            align-items: center;
+            justify-content: space-between;
+            gap: 14px;
+            background: rgba(255, 77, 109, 0.15);
+            border: 1.5px solid rgba(255, 77, 109, 0.5);
+            border-radius: 12px;
+            padding: 14px 20px;
+            margin-bottom: 18px;
+            animation: alarmPulse 1s infinite;
+        }
+
+        .alarm-banner.active { display: flex; }
+
+        .alarm-text {
+            font-size: 14px;
+            font-weight: 700;
+            color: #ff4d6d;
+            letter-spacing: 0.3px;
+        }
+
+        .alarm-reset-btn {
+            background: #ff4d6d;
+            color: #fff;
+            border: none;
+            border-radius: 8px;
+            padding: 8px 18px;
+            font-size: 13px;
+            font-weight: 700;
+            cursor: pointer;
+            white-space: nowrap;
+            transition: opacity 0.2s;
+        }
+
+        .alarm-reset-btn:hover { opacity: 0.85; }
+
+        @keyframes alarmPulse {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(255, 77, 109, 0.0); }
+            50%       { box-shadow: 0 0 12px 4px rgba(255, 77, 109, 0.25); }
+        }
+
         @media (max-width: 1080px) {
             .monitor-grid {
                 grid-template-columns: 1fr;
@@ -188,6 +230,11 @@
                     <div class="page-breadcrumb">
                         <span class="live-indicator"><span class="live-dot"></span>AI Inference Pipeline Online</span>
                     </div>
+                </div>
+
+                <div id="alarmBanner" class="alarm-banner">
+                    <span class="alarm-text">⚠️ CẢNH BÁO: Phát hiện ngã! Nhấn RESET để tắt còi.</span>
+                    <button class="alarm-reset-btn" onclick="doResetAlarm()">RESET ALARM</button>
                 </div>
 
                 <section class="monitor-grid">
@@ -251,6 +298,17 @@
         let frameCount = 0;
         let lastFrameTs = null;
         let reconnectTimer = null;
+        const alarmBanner = document.getElementById('alarmBanner');
+
+        function setAlarm(active) {
+            alarmBanner.classList.toggle('active', active);
+        }
+
+        function doResetAlarm() {
+            fetch('/reset_alarm', { method: 'POST' })
+                .then(() => { setAlarm(false); refreshSnapshot(); })
+                .catch(err => console.error('[RESET]', err));
+        }
 
         function setWsState(isOnline, label) {
             wsStatus.classList.toggle('online', isOnline);
@@ -268,9 +326,7 @@
 
             ws.onmessage = function (event) {
                 const payload = JSON.parse(event.data);
-                if (!payload.image) {
-                    return;
-                }
+                if (!payload.image) return;
 
                 const now = Date.now();
                 frameCount += 1;
@@ -279,13 +335,13 @@
 
                 if (lastFrameTs !== null) {
                     const dt = now - lastFrameTs;
-                    if (dt > 0) {
-                        fpsCounter.textContent = (1000 / dt).toFixed(1);
-                    }
+                    if (dt > 0) fpsCounter.textContent = (1000 / dt).toFixed(1);
                 }
                 lastFrameTs = now;
 
                 mainVideo.src = 'data:image/jpeg;base64,' + payload.image;
+
+                if (payload.alarm !== undefined) setAlarm(payload.alarm);
             };
 
             ws.onclose = function () {
@@ -307,7 +363,7 @@
         }
 
         function resetTrigger() {
-            refreshSnapshot();
+            doResetAlarm();
         }
 
         setInterval(refreshSnapshot, 2000);

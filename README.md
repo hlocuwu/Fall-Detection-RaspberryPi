@@ -1,114 +1,182 @@
-# Hệ Thống Nhận Diện Tự Động Người Té Ngã (Raspberry Pi & Server AI)
+# Fall Detection System — NT532.Q21 Group 02 UIT
 
-Đây là một dự án ứng dụng Computer Vision (sử dụng MediaPipe) để phát hiện hành vi té ngã thông qua Camera. Hệ thống có khả năng hoạt động trên môi trường thực tế với Raspberry Pi (kết hợp các cảm biến, còi báo động) hoặc có thể được dùng dưới dạng test Local/Desktop.
+Hệ thống phát hiện té ngã sử dụng MediaPipe Pose trên Raspberry Pi, stream video qua WebSocket về server AI, cảnh báo qua Telegram và còi buzzer.
 
-## 🌟 Chức Năng Chính
-- **AI Backend Server (`server.py`)**: Nhận dữ liệu hình ảnh liên tục từ Client, dùng `mediapipe.solutions.pose` trích xuất khung xương, phân tích tính toán góc ngã và khoảng cách.
-- **Client Camera (`client.py`)**: Chạy vòng lặp lấy frame từ Webcam, nén và gửi Stream qua API. Gửi thêm thông số hệ thống (CPU, RAM).
-- **Hệ thống cảnh báo**: Khi phát hiện ngã, kích hoạt Buzzer (Pin GPIO 17) và gửi cảnh báo qua Telegram.
-- **Lưu trữ Cloud**: Tự động lưu hình ảnh lúc ngã lên Google Cloud Storage (Bucket `fall-log-data`). Có chế độ tự động lưu file Local (thư mục `fall_events/`) nếu không có GCS.
-- **Dashboard Web**: Cung cấp giao diện trực quan tại đường dẫn `http://<IP_SERVER>:8000/`. Dashboard vẽ biểu đồ lịch sử, xem camera trực tiếp.
+## Kiến trúc hệ thống
 
-## 💻 Cài Đặt Hệ Thống
-
-### 1. Chuẩn Bị Môi Trường
-Đảm bảo hệ thống sử dụng Python 3.9 - 3.11. Để tránh xung đột gói, bạn **phải cài đặt chính xác** các phiên bản thư viện đã cung cấp (đặc biệt là MediaPipe 0.10.9 và Google Cloud Storage phiên bản tương thích).
-
-```bash
-# Clone hoặc tải code về máy
-cd NT131-Fall_Detection_RaspberryPi
-
-# (Tuỳ chọn) Tạo môi trường ảo
-# python -m venv venv
-# source venv/bin/activate
-
-# Cài đặt toàn bộ thư viện
-pip install -r requirements.txt
+```
+Raspberry Pi  ──WebSocket──►  AWS EC2 Server  ──►  Web Dashboard
+  camera                       AI inference          (Firebase Auth)
+  buzzer                       Telegram alert
+                                GCS / local log
 ```
 
-*(Đặc biệt đối với Raspberry Pi: Chạy thêm lệnh `pip install RPi.GPIO` để cài đặt thư viện phần cứng).*
+---
 
-### 2. Cấu Hình Biến Môi Trường (`.env`)
-Tạo một file `.env` ở cùng thư mục chứa code và cấu hình các biến sau:
+## Cấu hình biến môi trường
+
+### Server (AWS EC2) — file `.env`
 
 ```env
-# Địa chỉ URL của Server Backend:
-# - Chạy trên cùng 1 máy: http://127.0.0.1:8000
-# - Chạy qua mạng LAN hoặc VPS: http://IP_MAY_SERVER:8000
-SERVER_URL=http://127.0.0.1:8000
+TELEGRAM_TOKEN=<token từ @BotFather>
+TELEGRAM_CHAT_ID=<chat id của bạn>
 
-# API Bot Telegram để nhận cảnh báo:
-TELEGRAM_TOKEN=your_telegram_bot_token_here
-TELEGRAM_CHAT_ID=your_telegram_chat_id_here
-
-# (Tuỳ chọn) Cấu hình Google Cloud Platform
-GOOGLE_APPLICATION_CREDENTIALS=/path/to/your/gcp-service-account.json
+# Tuỳ chọn — nếu muốn upload ảnh lên Google Cloud Storage
+GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
 ```
 
-***
+### Client (Raspberry Pi) — file `.env`
 
-## 🚀 Hướng Dẫn Chạy & Kiểm Thử (Run)
+```env
+SERVER_URL=http://<EC2-PUBLIC-IP>:8000
+CAMERA_INDEX=1
+```
 
-### 🔴 Khởi Chạy Server (Backend + Website)
-Chạy server trước để hệ thống lắng nghe và cung cấp trang web:
+> `.env` không được commit lên repo. Tạo thủ công trên từng máy.
+
+---
+
+## Khởi chạy Server (AWS EC2 — Ubuntu 22.04/24.04)
 
 ```bash
-uv run uvicorn server:app --host 0.0.0.0 --port 8000 --reload
+# 1. Clone repo
+git clone <repo-url>
+cd Fall-Detection-RaspberryPi
+
+# 2. Tạo virtual environment
+  python3 -m venv .venv
+source .venv/bin/activate
+
+# 3. Cài dependencies
+pip install -r requirements.txt
+
+# 4. Tạo file .env (xem mục cấu hình bên trên)
+nano .env
+
+# 5. Chạy server
+python3 -m uvicorn server:app --host 0.0.0.0 --port 8000
 ```
-Mở trình duyệt, truy cập `http://localhost:8000` hoặc `http://127.0.0.1:8000`.
 
-### 🔐 Xác Thực Người Dùng Với Firebase (Email/Password + Google)
-Website đã được tách riêng trang đăng nhập tại `http://localhost:8000/login` và dùng Firebase Authentication thực sự.
-
-1. Tạo project trên Firebase Console.
-2. Bật các phương thức đăng nhập trong Firebase Authentication:
-  - Email/Password
-  - Google
-3. Tạo Firestore Database (mode test/dev trước, sau đó siết rule theo production).
-4. Copy file cấu hình mẫu:
+**Chạy như service (tự restart khi crash):**
 
 ```bash
-copy custom\firebase-config.example.js custom\firebase-config.js
+sudo nano /etc/systemd/system/falldetect.service
 ```
 
-5. Điền thông tin Firebase app vào file `custom/firebase-config.js`.
+```ini
+[Unit]
+Description=Fall Detection Server
+After=network.target
 
-Sau khi cấu hình xong:
-- User có thể `Create Account` để tạo tài khoản mới.
-- User có thể `Sign In` bằng Email/Password.
-- User có thể đăng nhập bằng `Continue with Google`.
-- Hồ sơ người dùng được lưu trong Firestore collection `users`.
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/Fall-Detection-RaspberryPi
+ExecStart=/home/ubuntu/Fall-Detection-RaspberryPi/.venv/bin/uvicorn server:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=3
 
-### 🔵 Khởi Chạy Client (Desktop Camera HOẶC Raspberry Pi)
-Mở một cửa sổ Terminal/Command Prompt thứ 2 và chạy client:
+[Install]
+WantedBy=multi-user.target
+```
 
-**Trường hợp 1: Chạy Desktop / Windows (Đóng giả Pi):**
 ```bash
-python client.py
-# Ở môi trường PC, hệ thống sẽ tự động phát hiện thiếu GPIO và chuyển 
-# báo động qua chế độ [LOCAL] (Chỉ in ra Text chứ không chập mạch điện thật).
-```
-**Lưu ý khi chạy PC**: Hàm `cv2.VideoCapture(0)` có thể gặp lỗi nếu bạn chạy lệnh này bên trong ảo hoá WSL/Ubuntu mà chưa cấp quyền pass-through Camera. Lời khuyên là hãy **chạy file `client.py` bằng Python gốc Cài trực tiếp trên Windows**, hoặc thay số `0` bằng tên một file `.mp4` (VD: `cv2.VideoCapture('test.mp4')`).
+sudo systemctl daemon-reload
+sudo systemctl enable falldetect
+sudo systemctl start falldetect
 
-**Trường hợp 2: Chạy thực tế trên Raspberry Pi:**
+# Xem log
+sudo journalctl -u falldetect -f
+```
+
+**Lưu ý AWS Security Group:** Mở inbound TCP port **8000**, source `0.0.0.0/0`.
+
+**Firebase Authorized Domains:** Thêm IP public EC2 vào Firebase Console → Authentication → Settings → Authorized domains.
+
+---
+
+## Khởi chạy Client (Raspberry Pi)
+
 ```bash
-python client.py
-# Hệ thống sẽ điều khiển trực tiếp còi qua GPIO17 và dùng cam V4L2.
+# 1. Clone repo
+git clone <repo-url>
+cd Fall-Detection-RaspberryPi
+
+# 2. Cài dependencies
+pip install -r requirements.txt
+pip install RPi.GPIO
+
+# 3. Tạo file .env
+nano .env
+
+# 4. Tắt còi trước khi chạy (buzzer kêu lúc mới cắm nguồn)
+python3 -c "import RPi.GPIO as GPIO; GPIO.setwarnings(False); GPIO.setmode(GPIO.BCM); GPIO.setup(17, GPIO.OUT); GPIO.output(17, GPIO.HIGH)"
+
+# 5. Chạy client
+python3 client.py
 ```
 
-## 🛠 Cấu Trúc Thư Mục
-```text
-📦 NT131-Fall_Detection_RaspberryPi
- ┣ 📂 custom/
- ┃ ┗ 📜 styles.css          # Style giao diện website
- ┣ 📂 templates/            # Các trang HTML Dashboard
- ┃ ┣ 📜 login.html          # Trang đăng nhập Firebase
- ┃ ┣ 📜 index.html          # Dashboard (đã yêu cầu đăng nhập)
- ┃ ┣ 📜 camera.html
- ┃ ┣ 📜 chart.html
- ┃ ┗ 📜 fallchart.html
- ┣ 📜 server.py             # File Backend chính xử lý AI
- ┣ 📜 client.py             # File Client bắt hình & đẩy lên Sever
- ┣ 📜 requirements.txt      # Thông tin version thư viện bắt buộc
- ┗ 📜 README.md             # File hướng dẫn (bạn đang đọc)
+**Tự tắt còi khi boot (crontab):**
+
+```bash
+crontab -e
+# Thêm dòng:
+@reboot python3 /home/pi/Fall-Detection-RaspberryPi/buzzer_off.py
 ```
+
+---
+
+## Sơ đồ nối dây Buzzer (Active-Low, Low Level Trigger)
+
+```
+Raspberry Pi GPIO Header (nhìn từ trên)
+
+        3.3V  [1] [2]  5V
+       GPIO2  [3] [4]  5V
+       GPIO3  [5] [6]  GND
+       GPIO4  [7] [8]  GPIO14
+         GND  [9] [10] GPIO15
+      GPIO17 [11] [12] GPIO18
+               ↑
+           I/O còi
+
+Kết nối:
+  Còi VCC  →  Pin 1  (3.3V)
+  Còi GND  →  Pin 6  (GND)
+  Còi I/O  →  Pin 11 (GPIO17)
+
+Logic:
+  GPIO17 HIGH  =  còi TẮT  (trạng thái mặc định)
+  GPIO17 LOW   =  còi KÊU  (khi phát hiện ngã)
+```
+
+---
+
+## Cấu trúc thư mục
+
+```
+Fall-Detection-RaspberryPi/
+├── server.py            # FastAPI server — AI inference, WebSocket, API
+├── client.py            # Raspberry Pi client — camera, buzzer, metrics
+├── buzzer_off.py        # Script tắt còi khi boot
+├── fall_log.json        # Log timestamp các sự kiện ngã (persist qua restart)
+├── requirements.txt     # Python dependencies
+├── .env                 # Biến môi trường (không commit)
+├── custom/
+│   ├── styles.css
+│   ├── firebase-config.js
+│   └── auth-guard.js
+└── templates/
+    ├── login.html       # Trang đăng nhập Firebase
+    ├── index.html       # Dashboard
+    ├── camera.html      # Live camera monitor
+    ├── chart.html       # System metrics (CPU, RAM)
+    └── fallchart.html   # Fall statistics
+```
+
+---
+
+## Lấy Telegram credentials
+
+1. Tìm **@BotFather** trên Telegram → `/newbot` → lấy `TELEGRAM_TOKEN`
+2. Gửi tin nhắn bất kỳ cho bot vừa tạo
+3. Mở `https://api.telegram.org/bot<TOKEN>/getUpdates` → lấy `chat.id`

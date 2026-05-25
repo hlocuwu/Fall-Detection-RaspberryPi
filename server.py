@@ -66,13 +66,15 @@ body_angle:     str             = "front"
 metrics_data:   dict            = {"cpu": 0, "memory": 0}
 hip_history:    deque           = deque(maxlen=4)
 fall_log:       list[datetime]  = _load_fall_log()
+alarm_active:   bool            = False
+pi_ws_ref:      WebSocket | None = None
 
 print(f"[FALL LOG] Loaded {len(fall_log)} past events")
 
 frame_queue: asyncio.Queue = asyncio.Queue(maxsize=1)
 web_clients: set           = set()
 
-FALL_DETECTION_FRAMES = 3
+FALL_DETECTION_FRAMES = 5
 FALL_COOLDOWN         = 5
 
 # ── Storage ───────────────────────────────────────────────────────────────────
@@ -114,17 +116,29 @@ def detect_fall(lm) -> tuple[bool, str]:
     hip_history.append(hip_y)
     velocity = (hip_history[-1] - hip_history[0]) if len(hip_history) >= 2 else 0.0
 
+    # Bounding box aspect ratio — quan trọng với camera góc cao
+    pts = [(lm[i][0], lm[i][1]) for i in range(33) if lm[i][3] > 0.3]
+    bbox_fallen = False
+    if len(pts) >= 6:
+        xs, ys = zip(*pts)
+        w = max(xs) - min(xs)
+        h = max(ys) - min(ys)
+        if w > 0.02:
+            aspect = h / w  # < 1.0 = nằm ngang = ngã
+            bbox_fallen = aspect < 0.8 and velocity > 0.010
+
     is_fall = (
         angle > 65
-        or (angle > 45 and nose_near and velocity > 0.008)
-        or (velocity > 0.025 and angle > 30)
+        or (angle > 50 and nose_near and velocity > 0.015)
+        or (velocity > 0.030 and angle > 35)
+        or bbox_fallen
     )
     status = f"Fall! {angle:.0f}deg v={velocity:.3f}" if is_fall else f"Normal {angle:.0f}deg"
     return is_fall, status
 
 # ── Frame processing ──────────────────────────────────────────────────────────
 def process_frame(img_bytes: bytes) -> tuple[bytes | None, bool]:
-    global fall_counter, last_fall_time, fall_frame, body_angle
+    global fall_counter, last_fall_time, fall_frame, body_angle, alarm_active
 
     np_img = np.frombuffer(img_bytes, np.uint8)
     img    = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
@@ -146,6 +160,7 @@ def process_frame(img_bytes: bytes) -> tuple[bytes | None, bool]:
             fall_counter += 1
             if fall_counter >= FALL_DETECTION_FRAMES and current_time - last_fall_time > FALL_COOLDOWN:
                 is_falling     = True
+                alarm_active   = True
                 last_fall_time = current_time
                 fall_counter   = 0
                 fall_log.append(datetime.now())
@@ -186,7 +201,7 @@ async def ai_inference_worker():
                     print(f"[WS] Send to Pi failed: {e}")
 
             if web_clients:
-                msg  = json.dumps({"image": base64.b64encode(processed).decode()})
+                msg  = json.dumps({"image": base64.b64encode(processed).decode(), "alarm": alarm_active})
                 dead = set()
                 for ws in web_clients:
                     try:    await ws.send_text(msg)
@@ -198,7 +213,10 @@ async def ai_inference_worker():
 # ── WebSocket endpoints ───────────────────────────────────────────────────────
 @app.websocket("/ws/pi")
 async def ws_pi(websocket: WebSocket):
+    global pi_ws_ref
     await websocket.accept()
+    pi_ws_ref = websocket
+    print("[WS] Pi connected")
     try:
         while True:
             data = await websocket.receive_bytes()
@@ -207,6 +225,7 @@ async def ws_pi(websocket: WebSocket):
                 except asyncio.QueueEmpty: pass
             await frame_queue.put((data, websocket))
     except WebSocketDisconnect:
+        pi_ws_ref = None
         print("[WS] Pi disconnected")
 
 @app.websocket("/ws/web")
@@ -254,6 +273,18 @@ async def receive_metrics(data: dict):
 @app.get("/get_metrics")
 async def get_metrics():
     return metrics_data
+
+@app.post("/reset_alarm")
+async def reset_alarm():
+    global alarm_active
+    alarm_active = False
+    if pi_ws_ref:
+        try:
+            await pi_ws_ref.send_json({"event": "RESET"})
+            print("[ALARM] Reset sent to Pi")
+        except Exception as e:
+            print(f"[ALARM] Reset send to Pi failed: {e}")
+    return {"status": "ok"}
 
 @app.get("/fall_stats")
 async def fall_stats(month: str | None = None):
