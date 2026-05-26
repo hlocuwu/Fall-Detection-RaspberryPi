@@ -66,8 +66,9 @@ body_angle:     str             = "front"
 metrics_data:   dict            = {"cpu": 0, "memory": 0}
 hip_history:    deque           = deque(maxlen=4)
 fall_log:       list[datetime]  = _load_fall_log()
-alarm_active:   bool            = False
-pi_ws_ref:      WebSocket | None = None
+alarm_active:    bool             = False
+pi_ws_ref:       WebSocket | None = None
+last_fall_label: str              = ""
 
 print(f"[FALL LOG] Loaded {len(fall_log)} past events")
 
@@ -78,8 +79,7 @@ FALL_DETECTION_FRAMES = 5
 FALL_COOLDOWN         = 5
 
 # ── Storage ───────────────────────────────────────────────────────────────────
-def log_fall_event(image_bytes: bytes, timestamp: float):
-    label = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime(timestamp))
+def log_fall_event(image_bytes: bytes, timestamp: float, label: str):
     try:
         bucket = storage.Client().bucket("fall-log-data")
         bucket.blob(f"fall_events/{label}.jpg").upload_from_string(image_bytes, content_type="image/jpeg")
@@ -138,7 +138,7 @@ def detect_fall(lm) -> tuple[bool, str]:
 
 # ── Frame processing ──────────────────────────────────────────────────────────
 def process_frame(img_bytes: bytes) -> tuple[bytes | None, bool]:
-    global fall_counter, last_fall_time, fall_frame, body_angle, alarm_active
+    global fall_counter, last_fall_time, fall_frame, body_angle, alarm_active, last_fall_label
 
     np_img = np.frombuffer(img_bytes, np.uint8)
     img    = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
@@ -159,16 +159,17 @@ def process_frame(img_bytes: bytes) -> tuple[bytes | None, bool]:
         if is_fall:
             fall_counter += 1
             if fall_counter >= FALL_DETECTION_FRAMES and current_time - last_fall_time > FALL_COOLDOWN:
-                is_falling     = True
-                alarm_active   = True
-                last_fall_time = current_time
-                fall_counter   = 0
+                is_falling      = True
+                alarm_active    = True
+                last_fall_time  = current_time
+                fall_counter    = 0
+                last_fall_label = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime(current_time))
                 fall_log.append(datetime.now())
                 _save_fall_log(fall_log)
                 print(f"[FALL] {status}")
                 _, buf = cv2.imencode(".jpg", img)
                 fall_frame = buf.tobytes()
-                threading.Thread(target=log_fall_event,      args=(fall_frame, current_time), daemon=True).start()
+                threading.Thread(target=log_fall_event,      args=(fall_frame, current_time, last_fall_label), daemon=True).start()
                 threading.Thread(target=send_telegram_alert, args=("⚠️ CẢNH BÁO: Phát hiện ngã! Vui lòng kiểm tra ngay.",), daemon=True).start()
         else:
             fall_counter = max(0, fall_counter - 1)
@@ -276,14 +277,30 @@ async def get_metrics():
 
 @app.post("/reset_alarm")
 async def reset_alarm():
-    global alarm_active
+    global alarm_active, fall_frame, fall_log, last_fall_label
     alarm_active = False
+    fall_frame   = None
+
+    if fall_log:
+        fall_log.pop()
+        _save_fall_log(fall_log)
+
+    if last_fall_label:
+        for ext in (".jpg", ".json"):
+            path = f"fall_events/{last_fall_label}{ext}"
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+        print(f"[ALARM] False alarm cleared — {last_fall_label}")
+        last_fall_label = ""
+
     if pi_ws_ref:
         try:
             await pi_ws_ref.send_json({"event": "RESET"})
-            print("[ALARM] Reset sent to Pi")
         except Exception as e:
             print(f"[ALARM] Reset send to Pi failed: {e}")
+
     return {"status": "ok"}
 
 @app.get("/fall_stats")
